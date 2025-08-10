@@ -10,24 +10,49 @@ import joblib
 import requests
 from web3.exceptions import InvalidAddress
 import logging
+import streamlit as st
 
-# Configure basic logging to provide informative output and error messages.
+# Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Load environment variables from a .env file for API keys and sensitive data.
+# Load .env file for local development
 load_dotenv()
 
-# Define and validate environment variables for API endpoints.
-WEB3_PROVIDER_URL = os.getenv("WEB3_PROVIDER_URL")
-COINGECKO_API_KEY = os.getenv("COINGECKO_API_KEY")
+def get_secret(key):
+    """
+    Universal secret getter that works:
+    - Locally with .env files
+    - Locally with Streamlit secrets
+    - On Streamlit Cloud with secrets
+    - With system environment variables
+    """
+    # Method 1: Try Streamlit secrets
+    try:
+        return st.secrets[key]
+    except:
+        pass
+    
+    # Method 2: Try environment variables (from .env or system)
+    env_value = os.getenv(key)
+    if env_value:
+        return env_value
+    
+    # Method 3: Return None if not found
+    return None
 
+# Usage
+WEB3_PROVIDER_URL = get_secret("WEB3_PROVIDER_URL")
+COINGECKO_API_KEY = get_secret("COINGECKO_API_KEY")
+
+# Validation
 if not WEB3_PROVIDER_URL:
-    logger.error("WEB3_PROVIDER_URL not set in .env file")
-    exit(1)
+    st.error("Missing WEB3_PROVIDER_URL")
+    st.stop()
+
 if not COINGECKO_API_KEY:
-    logger.error("COINGECKO_API_KEY not set in .env file")
-    exit(1)
+    st.error("⚠️ COINGECKO_API_KEY not found. Please check your .env file or Streamlit secrets.")
+    st.stop()
 
 # Establish a connection to the Ethereum network using the Web3 provider URL.
 w3 = Web3(Web3.HTTPProvider(WEB3_PROVIDER_URL))
