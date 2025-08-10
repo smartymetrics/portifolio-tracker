@@ -1,6 +1,5 @@
 # Core web framework
 streamlit>=1.28.0
-python>=3.13
 
 # Web3 and blockchain interaction
 web3>=6.0.0
