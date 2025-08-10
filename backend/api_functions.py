@@ -1,7 +1,7 @@
 # --- Imports and Initial Setup ---
 import os
 from dotenv import load_dotenv
-from typing import Dict, List
+from typing import Dict, List, Optional
 import time
 import asyncio
 import aiohttp
@@ -27,10 +27,12 @@ def get_secret(key):
     - On Streamlit Cloud with secrets
     - With system environment variables
     """
-    # Method 1: Try Streamlit secrets
+    # Method 1: Try Streamlit secrets (only if streamlit is available)
     try:
-        return st.secrets[key]
-    except:
+        import streamlit as st
+        if hasattr(st, 'secrets') and key in st.secrets:
+            return st.secrets[key]
+    except (ImportError, AttributeError, KeyError):
         pass
     
     # Method 2: Try environment variables (from .env or system)
@@ -41,31 +43,20 @@ def get_secret(key):
     # Method 3: Return None if not found
     return None
 
-# Usage
 WEB3_PROVIDER_URL = get_secret("WEB3_PROVIDER_URL")
 COINGECKO_API_KEY = get_secret("COINGECKO_API_KEY")
 
 # Validation
 if not WEB3_PROVIDER_URL:
-    st.error("Missing WEB3_PROVIDER_URL")
-    st.stop()
-
-if not COINGECKO_API_KEY:
-    st.error("⚠️ COINGECKO_API_KEY not found. Please check your .env file or Streamlit secrets.")
-    st.stop()
-
-# Establish a connection to the Ethereum network using the Web3 provider URL.
-w3 = Web3(Web3.HTTPProvider(WEB3_PROVIDER_URL))
-
-if w3.is_connected():
-    logger.info("Connected to Ethereum network.")
-else:
-    logger.error("Connection to Ethereum network failed.")
+    print("ERROR: Missing WEB3_PROVIDER_URL environment variable")
     exit(1)
 
-# --- Constants and Configuration ---
+# CoinGecko is now optional (fallback only)
+if not COINGECKO_API_KEY:
+    print("⚠️ COINGECKO_API_KEY not found. Using basic pricing only.")
+    logger.warning("No CoinGecko API key found, limited pricing available")
+
 # ERC-20 ABI: A minimal contract ABI to interact with ERC-20 tokens.
-# It includes functions to get balance, decimals, symbol, and name.
 ERC20_ABI = [
     {"constant": True, "inputs": [{"name": "_owner", "type": "address"}], "name": "balanceOf", "outputs": [{"name": "balance", "type": "uint256"}], "type": "function"},
     {"constant": True, "inputs": [], "name": "decimals", "outputs": [{"name": "", "type": "uint8"}], "type": "function"},
@@ -73,60 +64,142 @@ ERC20_ABI = [
     {"constant": True, "inputs": [], "name": "name", "outputs": [{"name": "", "type": "string"}], "type": "function"}
 ]
 
-# Cache settings for storing token price data locally to reduce API calls.
+# Database Cache settings
 DATABASE_FOLDER = 'database'
-TOKEN_DATABASE_CACHE = os.path.join(DATABASE_FOLDER, 'defillama_token_database.joblib')
-CACHE_EXPIRATION_TIME = 30 * 60  # Cache entries expire after 30 minutes.
-MAX_TOKEN_PRICE = 200000.0  # Set a max price to filter out potentially erroneous data.
+TOKEN_DATABASE_CACHE = os.path.join(DATABASE_FOLDER, 'token_price_database.joblib')
+CACHE_EXPIRATION_TIME = 30 * 60  # 30 minutes
+MAX_TOKEN_PRICE = 200000.0
 
-# --- Helper Functions ---
+# Global Web3 instance 
+w3: Optional[Web3] = None
+web3_initialized = False
+
+def initialize_web3_connection() -> bool:
+    """Initialize Web3 connection lazily when needed."""
+    global w3, web3_initialized
+    
+    if web3_initialized:
+        return w3 is not None
+    
+    try:
+        # Create Web3 instance with timeout
+        w3 = Web3(Web3.HTTPProvider(
+            WEB3_PROVIDER_URL,
+            request_kwargs={
+                'timeout': 20,
+                'headers': {
+                    'User-Agent': 'CryptoPortfolioTracker/1.0'
+                }
+            }
+        ))
+        
+        web3_initialized = True
+        logger.info("Web3 instance created successfully")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Failed to initialize Web3: {e}")
+        w3 = None
+        web3_initialized = True
+        return False
+
+def test_web3_connection() -> bool:
+    """Test Web3 connection only when needed."""
+    if not initialize_web3_connection():
+        return False
+    
+    try:
+        # Simple test - get latest block number
+        block_number = w3.eth.block_number
+        logger.info(f"Web3 connected. Latest block: {block_number}")
+        return True
+    except Exception as e:
+        logger.error(f"Web3 connection test failed: {e}")
+        return False
 
 def check_api_keys() -> Dict[str, bool]:
-    """Check if API keys are loaded successfully and return a status dictionary."""
-    return {"web3": w3.is_connected(), "coingecko": bool(COINGECKO_API_KEY)}
+    """Check API keys without initializing connections that might cause recursion."""
+    return {
+        "web3": bool(WEB3_PROVIDER_URL),  # Just check if URL exists
+        "coingecko": bool(COINGECKO_API_KEY)
+    }
 
 def validate_ethereum_address(address: str) -> bool:
     """Validate if a given string is a valid Ethereum address."""
-    try:
-        return w3.is_address(address)
-    except InvalidAddress:
+    if not address or not isinstance(address, str):
         return False
+    
+    try:
+        # Use Web3's static method (doesn't need connection)
+        return Web3.is_address(address)
     except Exception as e:
         logger.error(f"Error validating address {address}: {e}")
         return False
 
-def get_eth_balance(wallet_address: str, w3: Web3) -> float:
+def get_eth_balance(wallet_address: str) -> float:
     """Retrieve the native ETH balance of a wallet address."""
+    if not test_web3_connection():
+        logger.error("Web3 connection not available")
+        return 0.0
+        
     try:
         if not validate_ethereum_address(wallet_address):
             logger.error(f"Invalid ETH address provided: {wallet_address}")
             return 0.0
-        # Get balance in Wei and convert to Ether.
-        balance_wei = w3.eth.get_balance(w3.to_checksum_address(wallet_address))
-        return float(w3.from_wei(balance_wei, 'ether'))
+        
+        # Get balance in Wei and convert to Ether
+        balance_wei = w3.eth.get_balance(Web3.to_checksum_address(wallet_address))
+        return float(Web3.from_wei(balance_wei, 'ether'))
+        
     except Exception as e:
         logger.error(f"Error getting ETH balance for {wallet_address}: {e}")
         return 0.0
 
-def get_token_info_and_balance(wallet_address: str, contract_address: str, w3: Web3) -> Dict:
-    """Fetch ERC-20 token info (name, symbol, decimals) and balance for a wallet."""
+def get_token_info_and_balance(wallet_address: str, contract_address: str) -> Dict:
+    """Fetch ERC-20 token info and balance for a wallet."""
+    if not test_web3_connection():
+        logger.error("Web3 connection not available")
+        return {"address": contract_address, "symbol": "Error", "name": "Web3 Not Connected", "balance": 0.0, "decimals": 18}
+    
     try:
         if not validate_ethereum_address(wallet_address) or not validate_ethereum_address(contract_address):
-            return {"address": contract_address, "symbol": "Invalid", "name": "Invalid", "balance": 0.0, "decimals": 18}
+            return {"address": contract_address, "symbol": "Invalid", "name": "Invalid Address", "balance": 0.0, "decimals": 18}
 
-        # Create a contract instance with its address and ABI.
-        token_contract = w3.eth.contract(address=w3.to_checksum_address(contract_address), abi=ERC20_ABI)
-        balance_wei = token_contract.functions.balanceOf(w3.to_checksum_address(wallet_address)).call()
-        decimals = token_contract.functions.decimals().call()
-        symbol = token_contract.functions.symbol().call()
-
+        # Create contract instance
+        token_contract = w3.eth.contract(
+            address=Web3.to_checksum_address(contract_address), 
+            abi=ERC20_ABI
+        )
+        
+        # Get token information with individual try-catch blocks
+        balance_wei = 0
+        decimals = 18
+        symbol = "Unknown"
+        name = "Unknown Token"
+        
+        try:
+            balance_wei = token_contract.functions.balanceOf(Web3.to_checksum_address(wallet_address)).call()
+        except Exception as e:
+            logger.error(f"Error getting balance for {contract_address}: {e}")
+        
+        try:
+            decimals = token_contract.functions.decimals().call()
+        except Exception as e:
+            logger.error(f"Error getting decimals for {contract_address}: {e}")
+            
+        try:
+            symbol = token_contract.functions.symbol().call()
+        except Exception as e:
+            logger.error(f"Error getting symbol for {contract_address}: {e}")
+            
         try:
             name = token_contract.functions.name().call()
-        except:
-            name = symbol
+        except Exception as e:
+            logger.error(f"Error getting name for {contract_address}: {e}")
+            name = symbol  # Fallback to symbol
 
-        # Convert the balance from its smallest unit (Wei-like) to a readable float.
-        balance = balance_wei / (10 ** decimals)
+        # Convert balance from Wei-like units to readable float
+        balance = balance_wei / (10 ** decimals) if decimals > 0 else 0
 
         return {
             "address": contract_address.lower(),
@@ -135,187 +208,171 @@ def get_token_info_and_balance(wallet_address: str, contract_address: str, w3: W
             "balance": float(balance),
             "decimals": decimals
         }
+        
     except Exception as e:
         logger.error(f"Error getting token info for {contract_address}: {e}")
-        return {"address": contract_address.lower(), "symbol": "Unknown", "name": "Unknown Token", "balance": 0.0, "decimals": 18}
-
-def get_eth_price_sync() -> Dict:
-    """Synchronously get the current price of Ethereum from the CoinGecko Pro API."""
-    try:
-        url = "https://pro-api.coingecko.com/api/v3/simple/price"
-        params = {
-            "ids": "ethereum",
-            "vs_currencies": "usd",
-            "include_24hr_change": "true",
-            "x_cg_pro_api_key": COINGECKO_API_KEY
-        }
-        response = requests.get(url, params=params, timeout=10)
-        response.raise_for_status()
-        data = response.json()
-        eth_data = data.get("ethereum", {})
         return {
-            "price": eth_data.get("usd", 0.0),
-            "change_24h": eth_data.get("usd_24h_change", 0.0)
+            "address": contract_address.lower(), 
+            "symbol": "Error", 
+            "name": "Token Read Error", 
+            "balance": 0.0, 
+            "decimals": 18
         }
-    except Exception as e:
-        logger.error(f"Error getting ETH price: {e}")
-        return {"price": 0.0, "change_24h": 0.0}
 
-def get_coingecko_token_list() -> List[Dict]:
-    """Fetch a list of all supported tokens from CoinGecko to validate contract addresses."""
-    try:
-        url = "https://pro-api.coingecko.com/api/v3/coins/list?include_platform=true"
-        params = {"x_cg_pro-api-key": COINGECKO_API_KEY}
-        response = requests.get(url, params=params, timeout=10)
-        response.raise_for_status()
-        return response.json()
-    except Exception as e:
-        logger.error(f"Error fetching CoinGecko token list: {e}")
-        return []
-
-def is_token_supported(contract_address: str, token_list: List[Dict]) -> bool:
-    """Check if a specific contract address exists in the CoinGecko token list."""
-    for token in token_list:
-        if token.get("platforms", {}).get("ethereum", "").lower() == contract_address.lower():
-            return True
-    return False
+def get_eth_price() -> Dict:
+    # Check CoinGecko if available
+    if COINGECKO_API_KEY:
+        try:
+            url = "https://pro-api.coingecko.com/api/v3/simple/price"
+            params = {
+                "ids": "ethereum",
+                "vs_currencies": "usd",
+                "include_24hr_change": "true"
+            }
+            headers = {"x-cg-pro-api-key": COINGECKO_API_KEY}
+            
+            response = requests.get(url, params=params, headers=headers, timeout=15)
+            response.raise_for_status()
+            data = response.json()
+            
+            eth_data = data.get("ethereum", {})
+            price = eth_data.get("usd", 0.0)
+            change = eth_data.get("usd_24h_change", 0.0)
+            
+            logger.info(f"Got ETH price from CoinGecko: ${price:.2f}")
+            return {"price": price, "change_24h": change, "source": "coingecko"}
+            
+        except Exception as e:
+            logger.error(f"Error getting ETH price from CoinGecko: {e}")
+    
+    logger.warning("Could not get ETH price from any source")
+    return {"price": 0.0, "change_24h": 0.0, "source": "failed"}
 
 # --- Asynchronous Functions ---
 
 async def get_held_tokens_alchemy(wallet_address: str, session: aiohttp.ClientSession) -> List[str]:
-    """Asynchronously fetch all ERC-20 token addresses with non-zero balances for a wallet using Alchemy's API."""
+    """Get tokens with non-zero balances using Alchemy."""
     if not validate_ethereum_address(wallet_address):
-        logger.error(f"Invalid wallet address provided to Alchemy function.")
+        logger.error("Invalid wallet address provided to Alchemy function")
         return []
+    
     headers = {"accept": "application/json", "content-type": "application/json"}
     payload = {
-        "id": 1, "jsonrpc": "2.0", "method": "alchemy_getTokenBalances", "params": [w3.to_checksum_address(wallet_address), "erc20"]
+        "id": 1,
+        "jsonrpc": "2.0",
+        "method": "alchemy_getTokenBalances",
+        "params": [Web3.to_checksum_address(wallet_address), "erc20"]
     }
+    
     try:
-        async with session.post(WEB3_PROVIDER_URL, headers=headers, json=payload, timeout=20) as response:
+        async with session.post(WEB3_PROVIDER_URL, headers=headers, json=payload, timeout=30) as response:
             response.raise_for_status()
             data = await response.json()
+            
             token_addresses = []
             if "result" in data and "tokenBalances" in data["result"]:
                 for token_info in data["result"]["tokenBalances"]:
                     if token_info["tokenBalance"] != "0x0":
                         token_addresses.append(token_info["contractAddress"].lower())
-            logger.info(f"Found {len(token_addresses)} tokens with non-zero balances.")
+                        
+            logger.info(f"Found {len(token_addresses)} tokens with non-zero balances")
             return token_addresses
+            
     except Exception as e:
         logger.error(f"Error getting held tokens from Alchemy: {e}")
         return []
 
-async def fetch_token_prices(session: aiohttp.ClientSession, tokens: List[str]) -> Dict:
-    """Asynchronously fetch prices for a list of tokens from CoinGecko Pro API, with rate limiting and retry logic."""
-    if not tokens:
+async def fetch_coingecko_prices(session: aiohttp.ClientSession, tokens: List[str]) -> Dict:
+    """Fetch prices from CoinGecko"""
+    if not tokens or not COINGECKO_API_KEY:
         return {}
 
+    logger.info(f"Fetching fallback prices for {len(tokens)} tokens from CoinGecko...")
+    
     all_prices = {}
     headers = {"accept": "application/json", "x-cg-pro-api-key": COINGECKO_API_KEY}
-    token_list = get_coingecko_token_list()
-    valid_tokens = []
-    unsupported_tokens = []
-
-    # Filter for valid and supported tokens to avoid unnecessary API calls.
-    for token in tokens:
-        if token and isinstance(token, str) and validate_ethereum_address(token):
-            if is_token_supported(token, token_list):
-                valid_tokens.append(token)
-            else:
-                unsupported_tokens.append(token)
-        else:
-            logger.warning(f"Invalid token address skipped: {token}")
-
-    logger.info(f"Valid tokens: {len(valid_tokens)}, Unsupported tokens: {len(unsupported_tokens)}")
-
-    # Fetch prices in chunks to respect API limits.
-    chunk_size = 20
-    for i in range(0, len(valid_tokens), chunk_size):
-        chunk = valid_tokens[i:i + chunk_size]
+    
+    # Process in smaller chunks for better reliability
+    chunk_size = 15
+    for i in range(0, len(tokens), chunk_size):
+        chunk = tokens[i:i + chunk_size]
         contract_addresses_str = ','.join(chunk)
-        url = f"https://pro-api.coingecko.com/api/v3/simple/token_price/ethereum?contract_addresses={contract_addresses_str}&vs_currencies=usd"
+        url = f"https://pro-api.coingecko.com/api/v3/simple/token_price/ethereum?contract_addresses={contract_addresses_str}&vs_currencies=usd&include_24hr_change=true"
 
-        logger.debug(f"Request URL: {url}")
-
-        for attempt in range(3):
+        for attempt in range(2):  # Reduced attempts for fallback
             try:
                 async with session.get(url, headers=headers, timeout=15) as response:
                     if response.status == 429:
-                        logger.warning(f"Rate limited, waiting for {2 ** attempt} seconds...")
-                        await asyncio.sleep(2 ** attempt)
+                        wait_time = 2 ** attempt
+                        logger.warning(f"CoinGecko rate limited, waiting {wait_time}s...")
+                        await asyncio.sleep(wait_time)
                         continue
-                    response.raise_for_status()
-                    data = await response.json()
-                    logger.debug(f"API response data: {data}")
-
-                    if not isinstance(data, dict):
-                        logger.error("Unexpected API response format.")
-                        continue
-
-                    for contract, price_info in data.items():
-                        if contract and isinstance(contract, str):
-                            price = price_info.get("usd", 0.0)
-                            if price > MAX_TOKEN_PRICE:
-                                logger.error(f"Error: Token {contract} has invalid price of ${price:,.2f}, excluding from portfolio")
-                                continue
-                            all_prices[contract.lower()] = {
-                                "price": price,
-                                "change_24h": 0.0 # Note: The simple/token_price endpoint does not provide 24h change, so this is hardcoded to 0.0.
-                            }
-                        else:
-                            logger.error(f"Invalid contract address in response: {contract}")
+                        
+                    if response.status == 200:
+                        data = await response.json()
+                        
+                        if isinstance(data, dict):
+                            for contract, price_info in data.items():
+                                if contract and isinstance(price_info, dict) and "usd" in price_info:
+                                    price = price_info.get("usd", 0.0)
+                                    if 0 < price <= MAX_TOKEN_PRICE:
+                                        all_prices[contract.lower()] = {
+                                            "price": price,
+                                            "change_24h": price_info.get("usd_24h_change", 0.0),
+                                            "source": "coingecko"
+                                        }
+                                        logger.debug(f"CoinGecko: {contract} = ${price:.6f}")
                     break
+                    
             except Exception as e:
-                logger.error(f"Error fetching prices for chunk {chunk}: {e}, status: {response.status if 'response' in locals() else 'N/A'}")
-                if attempt == 2:
-                    for contract in chunk:
-                        all_prices[contract.lower()] = {"price": 0.0, "change_24h": 0.0}
+                logger.error(f"CoinGecko fallback error: {e}")
+                if attempt == 1:
+                    break
 
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(0.3)  # Rate limiting
 
-    # Handle tokens that were found but not supported by CoinGecko.
-    for token in unsupported_tokens:
-        all_prices[token.lower()] = {"price": 0.0, "change_24h": 0.0}
-        logger.warning(f"Token {token} not supported by CoinGecko, setting price to $0.00")
-
-    logger.info(f"Fetched prices for {len(all_prices)} tokens.")
+    logger.info(f"CoinGecko fallback: Found prices for {len(all_prices)} tokens")
     return all_prices
 
-def load_or_create_token_database() -> Dict:
-    """Load the token price cache from a file or create an empty dictionary if the file doesn't exist."""
-    os.makedirs(DATABASE_FOLDER, exist_ok=True)
-    try:
-        tokens = joblib.load(TOKEN_DATABASE_CACHE)
-        logger.info(f"Loaded {len(tokens)} tokens from database cache.")
-        
-        # Clean expired entries from the cache.
-        cleaned_tokens = {}
-        current_time = time.time()
-        for addr, data in tokens.items():
-            if isinstance(data, dict) and "price" in data and "timestamp" in data:
-                if current_time - data["timestamp"] <= CACHE_EXPIRATION_TIME:
-                    cleaned_tokens[addr] = data
-        if len(cleaned_tokens) < len(tokens):
-            logger.info(f"Cleaned {len(tokens) - len(cleaned_tokens)} expired entries from cache.")
-            save_token_database(cleaned_tokens) # Save the cleaned cache.
-        return cleaned_tokens
-    except FileNotFoundError:
-        logger.warning("Token database not found. Starting with an empty database.")
-        return {}
-    except Exception as e:
-        logger.error(f"Error loading token database: {e}. Starting with an empty database.")
-        return {}
-
 def save_token_database(tokens: Dict):
-    """Save the current token price dictionary to a file using joblib."""
+    """Save token price cache."""
     try:
         joblib.dump(tokens, TOKEN_DATABASE_CACHE)
-        logger.info(f"Saved {len(tokens)} tokens to database cache.")
+        logger.info(f"Saved {len(tokens)} tokens to cache")
     except Exception as e:
-        logger.error(f"Failed to save token database cache: {e}")
+        logger.error(f"Failed to save cache: {e}")
 
-# --- Main Logic Function ---
+def load_or_create_token_database() -> Dict:
+    """Load token price cache."""
+    os.makedirs(DATABASE_FOLDER, exist_ok=True)
+    
+    try:
+        tokens = joblib.load(TOKEN_DATABASE_CACHE)
+        logger.info(f"Loaded {len(tokens)} tokens from cache")
+        
+        # Clean expired entries
+        cleaned_tokens = {}
+        current_time = time.time()
+        
+        for addr, data in tokens.items():
+            if (isinstance(data, dict) and 
+                "price" in data and 
+                "timestamp" in data and
+                current_time - data["timestamp"] <= CACHE_EXPIRATION_TIME):
+                cleaned_tokens[addr] = data
+        
+        if len(cleaned_tokens) < len(tokens):
+            logger.info(f"Cleaned {len(tokens) - len(cleaned_tokens)} expired entries")
+            save_token_database(cleaned_tokens)
+        
+        return cleaned_tokens
+        
+    except FileNotFoundError:
+        logger.info("No cache found, starting fresh")
+        return {}
+    except Exception as e:
+        logger.error(f"Cache error: {e}, starting fresh")
+        return {}
 
 async def get_portfolio_data(wallet_address: str) -> Dict:
     """Main function to get a full portfolio breakdown: ETH balance, token balances, and their values."""
@@ -325,8 +382,8 @@ async def get_portfolio_data(wallet_address: str) -> Dict:
     token_database = load_or_create_token_database()
 
     # Get ETH balance and its price.
-    eth_balance = get_eth_balance(wallet_address, w3)
-    eth_price_data = get_eth_price_sync()
+    eth_balance = get_eth_balance(wallet_address)
+    eth_price_data = get_eth_price()
 
     # Initialize the portfolio dictionary.
     portfolio = {
@@ -356,11 +413,12 @@ async def get_portfolio_data(wallet_address: str) -> Dict:
         # Fetch prices for missing tokens and update the cache.
         if missing_tokens:
             logger.info(f"Fetching prices for {len(missing_tokens)} tokens...")
-            new_prices = await fetch_token_prices(session, missing_tokens)
+            new_prices = await fetch_coingecko_prices(session, missing_tokens)
             for addr, price_data in new_prices.items():
                 token_database[addr.lower()] = {
                     "price": price_data["price"],
                     "change_24h": price_data["change_24h"],
+                    "source": price_data["source"],
                     "timestamp": time.time()
                 }
             save_token_database(token_database)
@@ -373,7 +431,7 @@ async def get_portfolio_data(wallet_address: str) -> Dict:
 
             # Run balance and info fetching concurrently using asyncio.to_thread for blocking calls.
             token_info_tasks = [
-                asyncio.to_thread(get_token_info_and_balance, wallet_address, addr, w3)
+                asyncio.to_thread(get_token_info_and_balance, wallet_address, addr)
                 for addr in held_token_addresses
             ]
 
@@ -383,11 +441,12 @@ async def get_portfolio_data(wallet_address: str) -> Dict:
             for token_info in token_infos:
                 if token_info["balance"] > 0:
                     addr_lower = token_info["address"].lower()
-                    price_data = token_database.get(addr_lower, {"price": 0.0, "change_24h": 0.0, "timestamp": 0})
+                    price_data = token_database.get(addr_lower, {"price": 0.0, "change_24h": None, "source": "none", "timestamp": 0})
 
                     token_info.update({
                         "price": price_data["price"],
                         "change_24h": price_data["change_24h"],
+                        "price_source": price_data["source"],
                         "value": token_info["balance"] * price_data["price"]
                     })
 
@@ -400,42 +459,54 @@ async def get_portfolio_data(wallet_address: str) -> Dict:
     logger.info(f"Portfolio analysis complete. Total value: ${portfolio['total_value']:,.2f}")
     return portfolio
 
-# --- Main Execution Block ---
+# --- Main Execution ---
 async def main():
-    """Main function to run the portfolio tracker and print the results."""
-    # Example wallet address to analyze.
-    wallet_address = "0x0E6766293E15552Deed3Eaf8505f3640E29f4949"
+    """Main execution function."""
+    wallet_address = "0x226cc0Bae5251EBb637B9ecF5B1CdB99764abBCD"
 
-    logger.info("Starting portfolio analysis...")
+    logger.info("Starting simplified portfolio analysis (CoinGecko pricing)...")
     if not validate_ethereum_address(wallet_address):
-        logger.error("Invalid Ethereum address provided.")
+        logger.error("Invalid Ethereum address")
         return
 
-    # Call the main portfolio data function.
+    # Get portfolio data
     portfolio = await get_portfolio_data(wallet_address)
+    
+    if "error" in portfolio:
+        print(f"Error: {portfolio['error']}")
+        return
 
-    # Print the formatted portfolio summary.
-    print("\n" + "="*50)
+    # Print results
+    print("\n" + "="*60)
     print(f"Portfolio Summary for {portfolio['wallet_address']}")
-    print("="*50)
+    print("="*60)
     print(f"ETH Balance: {portfolio['eth_balance']:.4f} ETH")
     print(f"ETH Price: ${portfolio['eth_price']:,.2f} ({portfolio['eth_change_24h']:+.2f}%)")
     print(f"ETH Value: ${portfolio['eth_value']:,.2f}")
     print(f"Total Portfolio: ${portfolio['total_value']:,.2f}")
-    print(f"Number of Tokens: {len(portfolio['tokens'])}")
+    print(f"Tokens: {len(portfolio['tokens'])}")
 
-    print(f"\nTop 10 Token Holdings:")
-    print("-" * 80)
-    print(f"{'Token':<20} {'Balance':<15} {'Price':<15} {'Value':<12} {'24h Change':<10}")
-    print("-" * 80)
+    if portfolio['tokens']:
+        print(f"\nTop 10 Holdings:")
+        print("-" * 90)
+        print(f"{'Token':<20} {'Balance':<15} {'Price':<15} {'Value':<12} {'24h':<10} {'Source':<12}")
+        print("-" * 90)
 
-    for token in portfolio['tokens'][:10]:
-        balance_str = f"{token['balance']:.4f}"
-        price_str = f"${token['price']:,.8f}" if token['price'] > 0 and token['price'] < 0.01 else f"${token['price']:,.4f}" if token['price'] > 0 else "N/A"
-        value_str = f"${token['value']:,.2f}"
-        change_str = f"{token['change_24h']:+.2f}%" if token['change_24h'] != 0 else "N/A"
+        for token in portfolio['tokens'][:10]:
+            balance_str = f"{token['balance']:.4f}"
+            price_str = f"${token['price']:.8f}" if token['price'] < 0.01 else f"${token['price']:,.4f}"
+            value_str = f"${token['value']:,.2f}"
+            
+            # Fixed: Handle None values properly
+            change_24h = token.get('change_24h')
+            if change_24h is not None and change_24h != 0:
+                change_str = f"{change_24h:+.2f}%"
+            else:
+                change_str = "N/A"
+            
+            source_str = token.get('price_source', 'none')[:12]
 
-        print(f"{token['symbol']:<20} {balance_str:<15} {price_str:<15} {value_str:<12} {change_str:<10}")
+            print(f"{token['symbol']:<20} {balance_str:<15} {price_str:<15} {value_str:<12} {change_str:<10} {source_str:<12}")
 
 if __name__ == "__main__":
     asyncio.run(main())

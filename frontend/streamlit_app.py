@@ -247,7 +247,7 @@ def get_cached_portfolio_data(wallet_address):
                     'balance': float(token.get('balance', 0)),
                     'price': float(token.get('price', 0)),
                     'value': float(token.get('value', 0)),
-                    'change_24h': float(token.get('change_24h', 0))
+                    'change_24h': float(token.get('change_24h') or 0)
                 }
                 for token in portfolio_data.get('tokens', [])
             ],
