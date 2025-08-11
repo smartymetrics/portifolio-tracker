@@ -10,7 +10,6 @@ import joblib
 import requests
 from web3.exceptions import InvalidAddress
 import logging
-import streamlit as st
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -20,43 +19,28 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 
 def get_secret(key):
-    """
-    Universal secret getter that works:
-    - Locally with .env files
-    - Locally with Streamlit secrets
-    - On Streamlit Cloud with secrets
-    - With system environment variables
-    """
-    # Method 1: Try Streamlit secrets (only if streamlit is available)
-    try:
-        import streamlit as st
-        if hasattr(st, 'secrets') and key in st.secrets:
-            return st.secrets[key]
-    except (ImportError, AttributeError, KeyError):
-        pass
-    
-    # Method 2: Try environment variables (from .env or system)
-    env_value = os.getenv(key)
-    if env_value:
-        return env_value
-    
-    # Method 3: Return None if not found
-    return None
+    """Universal secret getter for environment variables."""
+    return os.getenv(key)
 
 WEB3_PROVIDER_URL = get_secret("WEB3_PROVIDER_URL")
 COINGECKO_API_KEY = get_secret("COINGECKO_API_KEY")
+ETHERSCAN_API_KEY = get_secret("ETHERSCAN_API_KEY")  # Add this to your .env
 
 # Validation
 if not WEB3_PROVIDER_URL:
     print("ERROR: Missing WEB3_PROVIDER_URL environment variable")
     exit(1)
 
-# CoinGecko is now optional (fallback only)
+if not ETHERSCAN_API_KEY:
+    print("ERROR: Missing ETHERSCAN_API_KEY environment variable")
+    print("Get one for free at: https://etherscan.io/apis")
+    exit(1)
+
 if not COINGECKO_API_KEY:
     print("⚠️ COINGECKO_API_KEY not found. Using basic pricing only.")
     logger.warning("No CoinGecko API key found, limited pricing available")
 
-# ERC-20 ABI: A minimal contract ABI to interact with ERC-20 tokens.
+# ERC-20 ABI
 ERC20_ABI = [
     {"constant": True, "inputs": [{"name": "_owner", "type": "address"}], "name": "balanceOf", "outputs": [{"name": "balance", "type": "uint256"}], "type": "function"},
     {"constant": True, "inputs": [], "name": "decimals", "outputs": [{"name": "", "type": "uint8"}], "type": "function"},
@@ -82,17 +66,13 @@ def initialize_web3_connection() -> bool:
         return w3 is not None
     
     try:
-        # Create Web3 instance with timeout
         w3 = Web3(Web3.HTTPProvider(
             WEB3_PROVIDER_URL,
             request_kwargs={
                 'timeout': 20,
-                'headers': {
-                    'User-Agent': 'CryptoPortfolioTracker/1.0'
-                }
+                'headers': {'User-Agent': 'CryptoPortfolioTracker/1.0'}
             }
         ))
-        
         web3_initialized = True
         logger.info("Web3 instance created successfully")
         return True
@@ -102,6 +82,14 @@ def initialize_web3_connection() -> bool:
         w3 = None
         web3_initialized = True
         return False
+    
+def check_api_keys() -> Dict[str, bool]:
+    """Check API keys without initializing connections that might cause recursion."""
+    return {
+        "web3": bool(WEB3_PROVIDER_URL),  # Just check if URL exists
+        "coingecko": bool(COINGECKO_API_KEY),
+        "etherscan": bool(ETHERSCAN_API_KEY)
+    }
 
 def test_web3_connection() -> bool:
     """Test Web3 connection only when needed."""
@@ -109,7 +97,6 @@ def test_web3_connection() -> bool:
         return False
     
     try:
-        # Simple test - get latest block number
         block_number = w3.eth.block_number
         logger.info(f"Web3 connected. Latest block: {block_number}")
         return True
@@ -117,20 +104,12 @@ def test_web3_connection() -> bool:
         logger.error(f"Web3 connection test failed: {e}")
         return False
 
-def check_api_keys() -> Dict[str, bool]:
-    """Check API keys without initializing connections that might cause recursion."""
-    return {
-        "web3": bool(WEB3_PROVIDER_URL),  # Just check if URL exists
-        "coingecko": bool(COINGECKO_API_KEY)
-    }
-
 def validate_ethereum_address(address: str) -> bool:
     """Validate if a given string is a valid Ethereum address."""
     if not address or not isinstance(address, str):
         return False
     
     try:
-        # Use Web3's static method (doesn't need connection)
         return Web3.is_address(address)
     except Exception as e:
         logger.error(f"Error validating address {address}: {e}")
@@ -147,7 +126,6 @@ def get_eth_balance(wallet_address: str) -> float:
             logger.error(f"Invalid ETH address provided: {wallet_address}")
             return 0.0
         
-        # Get balance in Wei and convert to Ether
         balance_wei = w3.eth.get_balance(Web3.to_checksum_address(wallet_address))
         return float(Web3.from_wei(balance_wei, 'ether'))
         
@@ -165,13 +143,12 @@ def get_token_info_and_balance(wallet_address: str, contract_address: str) -> Di
         if not validate_ethereum_address(wallet_address) or not validate_ethereum_address(contract_address):
             return {"address": contract_address, "symbol": "Invalid", "name": "Invalid Address", "balance": 0.0, "decimals": 18}
 
-        # Create contract instance
         token_contract = w3.eth.contract(
             address=Web3.to_checksum_address(contract_address), 
             abi=ERC20_ABI
         )
         
-        # Get token information with individual try-catch blocks
+        # Get token information with error handling
         balance_wei = 0
         decimals = 18
         symbol = "Unknown"
@@ -196,9 +173,8 @@ def get_token_info_and_balance(wallet_address: str, contract_address: str) -> Di
             name = token_contract.functions.name().call()
         except Exception as e:
             logger.error(f"Error getting name for {contract_address}: {e}")
-            name = symbol  # Fallback to symbol
+            name = symbol
 
-        # Convert balance from Wei-like units to readable float
         balance = balance_wei / (10 ** decimals) if decimals > 0 else 0
 
         return {
@@ -220,7 +196,7 @@ def get_token_info_and_balance(wallet_address: str, contract_address: str) -> Di
         }
 
 def get_eth_price() -> Dict:
-    # Check CoinGecko if available
+    """Get ETH price from CoinGecko."""
     if COINGECKO_API_KEY:
         try:
             url = "https://pro-api.coingecko.com/api/v3/simple/price"
@@ -248,58 +224,102 @@ def get_eth_price() -> Dict:
     logger.warning("Could not get ETH price from any source")
     return {"price": 0.0, "change_24h": 0.0, "source": "failed"}
 
-# --- Asynchronous Functions ---
+# --- Etherscan API Functions ---
 
-async def get_held_tokens_alchemy(wallet_address: str, session: aiohttp.ClientSession) -> List[str]:
-    """Get tokens with non-zero balances using Alchemy."""
+async def get_held_tokens_etherscan(wallet_address: str, session: aiohttp.ClientSession) -> List[str]:
+    """Get tokens with non-zero balances using Etherscan API."""
     if not validate_ethereum_address(wallet_address):
-        logger.error("Invalid wallet address provided to Alchemy function")
+        logger.error("Invalid wallet address provided to Etherscan function")
         return []
     
-    headers = {"accept": "application/json", "content-type": "application/json"}
-    payload = {
-        "id": 1,
-        "jsonrpc": "2.0",
-        "method": "alchemy_getTokenBalances",
-        "params": [Web3.to_checksum_address(wallet_address), "erc20"]
+    # Etherscan API endpoint for ERC-20 token transfers
+    url = "https://api.etherscan.io/api"
+    params = {
+        "module": "account",
+        "action": "tokentx",
+        "address": wallet_address,
+        "page": 1,
+        "offset": 1000,  # Get last 1000 transactions
+        "sort": "desc",
+        "apikey": ETHERSCAN_API_KEY
     }
     
     try:
-        async with session.post(WEB3_PROVIDER_URL, headers=headers, json=payload, timeout=30) as response:
+        async with session.get(url, params=params, timeout=30) as response:
             response.raise_for_status()
             data = await response.json()
             
-            token_addresses = []
-            if "result" in data and "tokenBalances" in data["result"]:
-                for token_info in data["result"]["tokenBalances"]:
-                    if token_info["tokenBalance"] != "0x0":
-                        token_addresses.append(token_info["contractAddress"].lower())
-                        
-            logger.info(f"Found {len(token_addresses)} tokens with non-zero balances")
-            return token_addresses
-            
+            if data.get("status") == "1" and "result" in data:
+                # Extract unique token contract addresses
+                token_addresses = set()
+                
+                for tx in data["result"]:
+                    contract_address = tx.get("contractAddress", "").lower()
+                    if contract_address and validate_ethereum_address(contract_address):
+                        token_addresses.add(contract_address)
+                
+                logger.info(f"Etherscan found {len(token_addresses)} unique token contracts from transaction history")
+                return list(token_addresses)
+            else:
+                logger.warning(f"Etherscan API returned status: {data.get('status')}, message: {data.get('message')}")
+                return []
+                
     except Exception as e:
-        logger.error(f"Error getting held tokens from Alchemy: {e}")
+        logger.error(f"Error getting held tokens from Etherscan: {e}")
         return []
+
+async def get_token_balances_etherscan(wallet_address: str, session: aiohttp.ClientSession) -> List[Dict]:
+    """Get current token balances using Etherscan API."""
+    if not validate_ethereum_address(wallet_address):
+        logger.error("Invalid wallet address provided to Etherscan function")
+        return []
+    
+    url = "https://api.etherscan.io/api"
+    params = {
+        "module": "account",
+        "action": "tokenbalance",
+        "address": wallet_address,
+        "tag": "latest",
+        "apikey": ETHERSCAN_API_KEY
+    }
+    
+    # This is a simpler approach - we'll get token addresses first, then check balances
+    token_addresses = await get_held_tokens_etherscan(wallet_address, session)
+    
+    # Add known important tokens that might not show up in recent transactions
+    important_tokens = [
+        "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",  # WETH
+        "0xdac17f958d2ee523a2206206994597c13d831ec7",  # USDT
+        "0xa0b86a33e6dd835b44f4164b67c7dd14c4c7f5cf",  # USDC
+        "0x6b175474e89094c44da98b954eedeac495271d0f",  # DAI
+        "0x514910771af9ca656af840dff83e8264ecf986ca",  # LINK
+        "0x1f9840a85d5af5bf1d1762f925bdaddc4201f984",  # UNI
+    ]
+    
+    # Combine discovered tokens with known important tokens
+    all_tokens = list(set(token_addresses + [addr.lower() for addr in important_tokens]))
+    
+    logger.info(f"Checking balances for {len(all_tokens)} tokens (including important tokens)")
+    return all_tokens
 
 async def fetch_coingecko_prices(session: aiohttp.ClientSession, tokens: List[str]) -> Dict:
     """Fetch prices from CoinGecko"""
     if not tokens or not COINGECKO_API_KEY:
         return {}
 
-    logger.info(f"Fetching fallback prices for {len(tokens)} tokens from CoinGecko...")
+    logger.info(f"Fetching prices for {len(tokens)} tokens from CoinGecko...")
     
     all_prices = {}
     headers = {"accept": "application/json", "x-cg-pro-api-key": COINGECKO_API_KEY}
     
-    # Process in smaller chunks for better reliability
+    # Process in chunks
     chunk_size = 15
     for i in range(0, len(tokens), chunk_size):
         chunk = tokens[i:i + chunk_size]
         contract_addresses_str = ','.join(chunk)
         url = f"https://pro-api.coingecko.com/api/v3/simple/token_price/ethereum?contract_addresses={contract_addresses_str}&vs_currencies=usd&include_24hr_change=true"
 
-        for attempt in range(2):  # Reduced attempts for fallback
+        for attempt in range(2):
             try:
                 async with session.get(url, headers=headers, timeout=15) as response:
                     if response.status == 429:
@@ -325,18 +345,19 @@ async def fetch_coingecko_prices(session: aiohttp.ClientSession, tokens: List[st
                     break
                     
             except Exception as e:
-                logger.error(f"CoinGecko fallback error: {e}")
+                logger.error(f"CoinGecko error: {e}")
                 if attempt == 1:
                     break
 
-        await asyncio.sleep(0.3)  # Rate limiting
+        await asyncio.sleep(0.5)  # Rate limiting
 
-    logger.info(f"CoinGecko fallback: Found prices for {len(all_prices)} tokens")
+    logger.info(f"CoinGecko: Found prices for {len(all_prices)} tokens")
     return all_prices
 
 def save_token_database(tokens: Dict):
     """Save token price cache."""
     try:
+        os.makedirs(DATABASE_FOLDER, exist_ok=True)
         joblib.dump(tokens, TOKEN_DATABASE_CACHE)
         logger.info(f"Saved {len(tokens)} tokens to cache")
     except Exception as e:
@@ -374,18 +395,18 @@ def load_or_create_token_database() -> Dict:
         logger.error(f"Cache error: {e}, starting fresh")
         return {}
 
-async def get_portfolio_data(wallet_address: str) -> Dict:
-    """Main function to get a full portfolio breakdown: ETH balance, token balances, and their values."""
-    logger.info(f"Analyzing portfolio for {wallet_address}")
+async def get_portfolio_data(wallet_address: str, debug_mode: bool = False) -> Dict:
+    """Main function to get portfolio data using Etherscan API."""
+    logger.info(f"Analyzing portfolio for {wallet_address} using Etherscan API")
 
-    # Load the local token price cache.
+    # Load token price cache
     token_database = load_or_create_token_database()
 
-    # Get ETH balance and its price.
+    # Get ETH balance and price
     eth_balance = get_eth_balance(wallet_address)
     eth_price_data = get_eth_price()
 
-    # Initialize the portfolio dictionary.
+    # Initialize portfolio
     portfolio = {
         "wallet_address": wallet_address,
         "eth_balance": eth_balance,
@@ -394,23 +415,26 @@ async def get_portfolio_data(wallet_address: str) -> Dict:
         "eth_value": eth_balance * eth_price_data["price"],
         "tokens": [],
         "total_value": eth_balance * eth_price_data["price"],
-        "last_updated": time.strftime("%Y-%m-%d %H:%M:%S")
+        "last_updated": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "debug_info": [] if debug_mode else None
     }
 
-    # Fetch held tokens from Alchemy API.
+    # Get token addresses using Etherscan
     async with aiohttp.ClientSession() as session:
-        held_token_addresses = await get_held_tokens_alchemy(wallet_address, session)
+        held_token_addresses = await get_token_balances_etherscan(wallet_address, session)
 
-        # Identify which token prices need to be fetched (not in cache or expired).
+        if debug_mode:
+            portfolio["debug_info"].append(f"Found {len(held_token_addresses)} token addresses from Etherscan")
+            portfolio["debug_info"].append(f"First 10 addresses: {held_token_addresses[:10]}")
+
+        # Check for missing prices
         missing_tokens = []
         for addr in held_token_addresses:
             addr_lower = addr.lower()
             if addr_lower not in token_database or (token_database[addr_lower].get("timestamp", 0) < time.time() - CACHE_EXPIRATION_TIME):
                 missing_tokens.append(addr)
-            else:
-                logger.debug(f"Using cached price for {addr_lower}: ${token_database[addr_lower]['price']:.8f}")
 
-        # Fetch prices for missing tokens and update the cache.
+        # Fetch prices for missing tokens
         if missing_tokens:
             logger.info(f"Fetching prices for {len(missing_tokens)} tokens...")
             new_prices = await fetch_coingecko_prices(session, missing_tokens)
@@ -422,14 +446,12 @@ async def get_portfolio_data(wallet_address: str) -> Dict:
                     "timestamp": time.time()
                 }
             save_token_database(token_database)
-        else:
-            logger.info("All token prices are in the cache and up-to-date.")
 
-        # Process all held tokens to get their details and calculate values.
+        # Get token balances and info
         if held_token_addresses:
             logger.info(f"Processing {len(held_token_addresses)} tokens...")
 
-            # Run balance and info fetching concurrently using asyncio.to_thread for blocking calls.
+            # Get token info concurrently
             token_info_tasks = [
                 asyncio.to_thread(get_token_info_and_balance, wallet_address, addr)
                 for addr in held_token_addresses
@@ -437,11 +459,26 @@ async def get_portfolio_data(wallet_address: str) -> Dict:
 
             token_infos = await asyncio.gather(*token_info_tasks)
 
-            # Build the final portfolio data structure.
-            for token_info in token_infos:
+            # Build portfolio
+            for i, token_info in enumerate(token_infos):
+                addr_lower = token_info["address"].lower()
+                
+                if debug_mode:
+                    portfolio["debug_info"].append(f"Token {i+1}: {token_info['symbol']} - Balance: {token_info['balance']:.8f}")
+                
+                # Include tokens with any balance > 0
                 if token_info["balance"] > 0:
-                    addr_lower = token_info["address"].lower()
                     price_data = token_database.get(addr_lower, {"price": 0.0, "change_24h": None, "source": "none", "timestamp": 0})
+
+                    # Special handling for WETH
+                    if token_info["symbol"].upper() == "WETH" and price_data["price"] == 0.0:
+                        price_data = {
+                            "price": eth_price_data["price"],
+                            "change_24h": eth_price_data["change_24h"],
+                            "source": "eth_price_mirror",
+                            "timestamp": time.time()
+                        }
+                        logger.info(f"Using ETH price for WETH: ${price_data['price']:.2f}")
 
                     token_info.update({
                         "price": price_data["price"],
@@ -452,8 +489,11 @@ async def get_portfolio_data(wallet_address: str) -> Dict:
 
                     portfolio["tokens"].append(token_info)
                     portfolio["total_value"] += token_info["value"]
+                    
+                    if debug_mode:
+                        portfolio["debug_info"].append(f"  ✅ Added: {token_info['symbol']} = ${token_info['value']:.2f}")
 
-    # Sort tokens by value in descending order.
+    # Sort by value
     portfolio["tokens"].sort(key=lambda x: x["value"], reverse=True)
 
     logger.info(f"Portfolio analysis complete. Total value: ${portfolio['total_value']:,.2f}")
@@ -462,15 +502,15 @@ async def get_portfolio_data(wallet_address: str) -> Dict:
 # --- Main Execution ---
 async def main():
     """Main execution function."""
-    wallet_address = "0x226cc0Bae5251EBb637B9ecF5B1CdB99764abBCD"
+    wallet_address = "0xde0B295669a9FD93d5F28D9Ec85E40f4cb697BAe"
 
-    logger.info("Starting simplified portfolio analysis (CoinGecko pricing)...")
+    logger.info("Starting portfolio analysis with Etherscan API...")
     if not validate_ethereum_address(wallet_address):
         logger.error("Invalid Ethereum address")
         return
 
     # Get portfolio data
-    portfolio = await get_portfolio_data(wallet_address)
+    portfolio = await get_portfolio_data(wallet_address, debug_mode=True)
     
     if "error" in portfolio:
         print(f"Error: {portfolio['error']}")
@@ -484,20 +524,25 @@ async def main():
     print(f"ETH Price: ${portfolio['eth_price']:,.2f} ({portfolio['eth_change_24h']:+.2f}%)")
     print(f"ETH Value: ${portfolio['eth_value']:,.2f}")
     print(f"Total Portfolio: ${portfolio['total_value']:,.2f}")
-    print(f"Tokens: {len(portfolio['tokens'])}")
+    print(f"Tokens Found: {len(portfolio['tokens'])}")
+
+    # Show debug info
+    if portfolio.get("debug_info"):
+        print(f"\nDEBUG INFO:")
+        for info in portfolio["debug_info"]:
+            print(f"  • {info}")
 
     if portfolio['tokens']:
-        print(f"\nTop 10 Holdings:")
-        print("-" * 90)
-        print(f"{'Token':<20} {'Balance':<15} {'Price':<15} {'Value':<12} {'24h':<10} {'Source':<12}")
-        print("-" * 90)
+        print(f"\nAll Token Holdings:")
+        print("-" * 110)
+        print(f"{'Token':<20} {'Balance':<18} {'Price':<15} {'Value':<12} {'24h Change':<12} {'Source':<12}")
+        print("-" * 110)
 
-        for token in portfolio['tokens'][:10]:
-            balance_str = f"{token['balance']:.4f}"
+        for token in portfolio['tokens']:
+            balance_str = f"{token['balance']:.8f}"
             price_str = f"${token['price']:.8f}" if token['price'] < 0.01 else f"${token['price']:,.4f}"
             value_str = f"${token['value']:,.2f}"
             
-            # Fixed: Handle None values properly
             change_24h = token.get('change_24h')
             if change_24h is not None and change_24h != 0:
                 change_str = f"{change_24h:+.2f}%"
@@ -506,7 +551,16 @@ async def main():
             
             source_str = token.get('price_source', 'none')[:12]
 
-            print(f"{token['symbol']:<20} {balance_str:<15} {price_str:<15} {value_str:<12} {change_str:<10} {source_str:<12}")
+            # Highlight WETH
+            symbol_display = token['symbol']
+            if token['symbol'].upper() == "WETH":
+                symbol_display = f"🔥 {token['symbol']} 🔥"
+
+            print(f"{symbol_display:<20} {balance_str:<18} {price_str:<15} {value_str:<12} {change_str:<12} {source_str:<12}")
+
+    print("\n" + "="*60)
+    print("Analysis complete!")
+    print("="*60)
 
 if __name__ == "__main__":
     asyncio.run(main())

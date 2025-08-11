@@ -113,23 +113,29 @@ def main():
         api_status = check_api_keys()
         st.subheader("API Status")
         
-        # Show API status in two columns
-        col1, col2 = st.columns(2)
+        # Show API status in three columns
+        col1, col2, col3 = st.columns(3)
         with col1:
             if api_status["web3"]:
-                st.success("✅ Web3")
+                st.success("✅ Alchemy")
             else:
-                st.error("❌ Web3")
+                st.error("❌ Alchemy")
         
         with col2:
             if api_status["coingecko"]:
                 st.success("✅ CoinGecko")
             else:
                 st.error("❌ CoinGecko")
+            
+        with col3:
+            if api_status["etherscan"]:
+                st.success("✅ Etherscan")
+            else:
+                st.error("❌ Etherscan")
         
         # Stop the app if API keys are missing
         if not all(api_status.values()):
-            st.error("⚠️ Please check your API keys and Web3 provider")
+            st.error("⚠️ Please check your API keys in the backend/api_functions.py file.")
             st.stop()
         
         st.markdown("---")
