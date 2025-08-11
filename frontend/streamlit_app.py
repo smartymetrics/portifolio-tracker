@@ -114,20 +114,20 @@ def main():
         st.subheader("API Status")
         
         # Show API status in three columns
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            if api_status["web3"]:
-                st.success("✅ Alchemy")
-            else:
-                st.error("❌ Alchemy")
+        col1, col2 = st.columns(2)
+        # with col1:
+        #     if api_status["web3"]:
+        #         st.success("✅ Alchemy")
+        #     else:
+        #         st.error("❌ Alchemy")
         
-        with col2:
+        with col1:
             if api_status["coingecko"]:
                 st.success("✅ CoinGecko")
             else:
                 st.error("❌ CoinGecko")
             
-        with col3:
+        with col2:
             if api_status["etherscan"]:
                 st.success("✅ Etherscan")
             else:
