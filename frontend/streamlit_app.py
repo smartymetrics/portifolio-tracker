@@ -366,11 +366,11 @@ def display_portfolio(portfolio_data):
     with col1:
         st.write("**Ethereum (ETH)**")
     with col2:
-        st.write(f"{portfolio_data['eth_balance']:.6f} ETH")
+        st.write(f"Balance: {portfolio_data['eth_balance']:.6f} ETH")
     with col3:
-        st.write(f"${portfolio_data['eth_price']:,.2f}")
+        st.write(f"Price: ${portfolio_data['eth_price']:,.2f}")
     with col4:
-        st.write(f"**${portfolio_data['eth_value']:,.2f}**")
+        st.write(f"Value: **${portfolio_data['eth_value']:,.2f}**")
     
     # Display ERC-20 tokens if any exist
     if portfolio_data["tokens"]:
