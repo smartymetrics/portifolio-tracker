@@ -114,13 +114,8 @@ def main():
         st.subheader("API Status")
         
         # Show API status in three columns
-        col1, col2 = st.columns(2)
-        # with col1:
-        #     if api_status["web3"]:
-        #         st.success("✅ Alchemy")
-        #     else:
-        #         st.error("❌ Alchemy")
-        
+        col1, col2, col3 = st.columns(3)
+        # Display status for each API        
         with col1:
             if api_status["coingecko"]:
                 st.success("✅ CoinGecko")
@@ -132,6 +127,12 @@ def main():
                 st.success("✅ Etherscan")
             else:
                 st.error("❌ Etherscan")
+        
+        with col3:
+            if api_status["web3"]:
+                st.success("✅ Alchemy")
+            else:
+                st.error("❌ Alchemy")
         
         # Stop the app if API keys are missing
         if not all(api_status.values()):
