@@ -24,8 +24,7 @@ def get_secret(key):
 
 WEB3_PROVIDER_URL = get_secret("WEB3_PROVIDER_URL")
 COINGECKO_API_KEY = get_secret("COINGECKO_API_KEY")
-ETHERSCAN_API_KEY = get_secret("ETHERSCAN_API_KEY")  # Add this to your .env
-
+ETHERSCAN_API_KEY = get_secret("ETHERSCAN_API_KEY") 
 # Validation
 if not WEB3_PROVIDER_URL:
     print("ERROR: Missing WEB3_PROVIDER_URL environment variable")
@@ -239,7 +238,7 @@ async def get_held_tokens_etherscan(wallet_address: str, session: aiohttp.Client
         "action": "tokentx",
         "address": wallet_address,
         "page": 1,
-        "offset": 1000,  # Get last 100,000 transactions
+        "offset": 1000,  # Get last 1,000 transactions
         "sort": "desc",
         "apikey": ETHERSCAN_API_KEY
     }
@@ -268,23 +267,21 @@ async def get_held_tokens_etherscan(wallet_address: str, session: aiohttp.Client
         logger.error(f"Error getting held tokens from Etherscan: {e}")
         return []
 
-async def get_token_balances_etherscan(wallet_address: str, session: aiohttp.ClientSession) -> List[Dict]:
-    """Get current token balances using Etherscan API."""
-    if not validate_ethereum_address(wallet_address):
-        logger.error("Invalid wallet address provided to Etherscan function")
-        return []
+async def get_all_token_addresses(wallet_address: str, session: aiohttp.ClientSession, 
+                                additional_tokens: Optional[List[str]] = None) -> List[str]:
+    """
+    Get all token addresses from Etherscan plus important tokens and user-specified tokens.
     
-    url = "https://api.etherscan.io/api"
-    params = {
-        "module": "account",
-        "action": "tokenbalance",
-        "address": wallet_address,
-        "tag": "latest",
-        "apikey": ETHERSCAN_API_KEY
-    }
+    Args:
+        wallet_address: The wallet address to analyze
+        session: aiohttp session for API calls
+        additional_tokens: Optional list of additional token contract addresses to include
     
-    # This is a simpler approach - we'll get token addresses first, then check balances
-    token_addresses = await get_held_tokens_etherscan(wallet_address, session)
+    Returns:
+        List of unique token contract addresses
+    """
+    # Get token addresses from transaction history
+    etherscan_tokens = await get_held_tokens_etherscan(wallet_address, session)
     
     # Add known important tokens that might not show up in recent transactions
     important_tokens = [
@@ -296,10 +293,27 @@ async def get_token_balances_etherscan(wallet_address: str, session: aiohttp.Cli
         "0x1f9840a85d5af5bf1d1762f925bdaddc4201f984",  # UNI
     ]
     
-    # Combine discovered tokens with known important tokens
-    all_tokens = list(set(token_addresses + [addr.lower() for addr in important_tokens]))
+    # Add user-specified additional tokens if provided
+    user_tokens = []
+    if additional_tokens:
+        # Validate and filter user-provided addresses
+        for addr in additional_tokens:
+            if isinstance(addr, str) and validate_ethereum_address(addr):
+                user_tokens.append(addr.lower())
+            else:
+                logger.warning(f"Invalid token address provided by user: {addr}")
     
-    logger.info(f"Checking balances for {len(all_tokens)} tokens (including important tokens)")
+    # Combine all token sources
+    all_token_sources = etherscan_tokens + [addr.lower() for addr in important_tokens] + user_tokens
+    all_tokens = list(set(all_token_sources))  # Remove duplicates
+    
+    logger.info(f"Total tokens to check: {len(all_tokens)} "
+               f"(Etherscan: {len(etherscan_tokens)}, Important: {len(important_tokens)}, "
+               f"User-added: {len(user_tokens)})")
+    
+    if user_tokens:
+        logger.info(f"User-added tokens: {user_tokens}")
+    
     return all_tokens
 
 async def fetch_coingecko_prices(session: aiohttp.ClientSession, tokens: List[str]) -> Dict:
@@ -395,8 +409,19 @@ def load_or_create_token_database() -> Dict:
         logger.error(f"Cache error: {e}, starting fresh")
         return {}
 
-async def get_portfolio_data(wallet_address: str, debug_mode: bool = False) -> Dict:
-    """Main function to get portfolio data using Etherscan API."""
+async def get_portfolio_data(wallet_address: str, debug_mode: bool = False, 
+                            additional_tokens: Optional[List[str]] = None) -> Dict:
+    """
+    Main function to get portfolio data using Etherscan API.
+    
+    Args:
+        wallet_address: The wallet address to analyze
+        debug_mode: Enable debug output
+        additional_tokens: Optional list of additional token contract addresses to include
+    
+    Returns:
+        Dictionary containing portfolio data
+    """
     logger.info(f"Analyzing portfolio for {wallet_address} using Etherscan API")
 
     # Load token price cache
@@ -419,17 +444,17 @@ async def get_portfolio_data(wallet_address: str, debug_mode: bool = False) -> D
         "debug_info": [] if debug_mode else None
     }
 
-    # Get token addresses using Etherscan
+    # Get all token addresses (from Etherscan + important tokens + user tokens)
     async with aiohttp.ClientSession() as session:
-        held_token_addresses = await get_token_balances_etherscan(wallet_address, session)
+        all_token_addresses = await get_all_token_addresses(wallet_address, session, additional_tokens)
 
         if debug_mode:
-            portfolio["debug_info"].append(f"Found {len(held_token_addresses)} token addresses from Etherscan")
-            portfolio["debug_info"].append(f"First 10 addresses: {held_token_addresses[:10]}")
+            portfolio["debug_info"].append(f"Found {len(all_token_addresses)} token addresses to check")
+            portfolio["debug_info"].append(f"First 10 addresses: {all_token_addresses[:10]}")
 
         # Check for missing prices
         missing_tokens = []
-        for addr in held_token_addresses:
+        for addr in all_token_addresses:
             addr_lower = addr.lower()
             if addr_lower not in token_database or (token_database[addr_lower].get("timestamp", 0) < time.time() - CACHE_EXPIRATION_TIME):
                 missing_tokens.append(addr)
@@ -448,13 +473,13 @@ async def get_portfolio_data(wallet_address: str, debug_mode: bool = False) -> D
             save_token_database(token_database)
 
         # Get token balances and info
-        if held_token_addresses:
-            logger.info(f"Processing {len(held_token_addresses)} tokens...")
+        if all_token_addresses:
+            logger.info(f"Processing {len(all_token_addresses)} tokens...")
 
             # Get token info concurrently
             token_info_tasks = [
                 asyncio.to_thread(get_token_info_and_balance, wallet_address, addr)
-                for addr in held_token_addresses
+                for addr in all_token_addresses
             ]
 
             token_infos = await asyncio.gather(*token_info_tasks)
@@ -504,13 +529,26 @@ async def main():
     """Main execution function."""
     wallet_address = "0x226cc0Bae5251EBb637B9ecF5B1CdB99764abBCD"
 
+    # Example: Add additional tokens that might be missing from Etherscan history
+    # Users can add any token contract addresses they want to check
+    additional_tokens_to_check = [
+        # Example tokens - users can modify this list
+        # "0x1f9840a85d5af5bf1d1762f925bdaddc4201f984",  # UNI (already in important tokens)
+        # "0x7fc66500c84a76ad7e9c93437bfc5ac33e2ddae9",  # AAVE
+        # "0xc944e90c64b2c07662a292be6244bdf05cda44a7",  # GRT
+    ]
+
     logger.info("Starting portfolio analysis with Etherscan API...")
     if not validate_ethereum_address(wallet_address):
         logger.error("Invalid Ethereum address")
         return
 
-    # Get portfolio data
-    portfolio = await get_portfolio_data(wallet_address, debug_mode=True)
+    # Get portfolio data with additional tokens
+    portfolio = await get_portfolio_data(
+        wallet_address, 
+        debug_mode=True, 
+        additional_tokens=additional_tokens_to_check if additional_tokens_to_check else None
+    )
     
     if "error" in portfolio:
         print(f"Error: {portfolio['error']}")
@@ -559,7 +597,7 @@ async def main():
             print(f"{symbol_display:<20} {balance_str:<18} {price_str:<15} {value_str:<12} {change_str:<12} {source_str:<12}")
 
     print("\n" + "="*60)
-    print("Analysis complete! WETH should now be visible.")
+    print("Analysis complete!")
     print("="*60)
 
 if __name__ == "__main__":

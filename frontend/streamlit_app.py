@@ -86,6 +86,14 @@ st.markdown("""
         border-radius: 5px;
         margin: 1rem 0;
     }
+
+    .token-input-section {
+        background-color: #f8f9fa;
+        padding: 1rem;
+        border-radius: 8px;
+        border: 1px solid #dee2e6;
+        margin: 1rem 0;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -186,11 +194,113 @@ def main():
             with st.spinner("Updating comprehensive token database..."):
                 load_or_create_token_database()
             st.success("Token database updated! This improves price accuracy.")
+
+        # Add missing tokens functionality
+        if st.button("🪙 Add Missing Tokens", use_container_width=True):
+            st.session_state.show_token_input = not st.session_state.get("show_token_input", False)
         
         # Clear cache button for fresh data
         if st.button("🗑️ Clear Cache", use_container_width=True):
             st.cache_data.clear()
             st.success("Cache cleared! Click Analyze to get fresh data.")
+    
+    # ========================================
+    # TOKEN INPUT SECTION (when "Add Missing Tokens" is clicked)
+    # ========================================
+    
+    # Initialize additional tokens in session state
+    if "additional_tokens" not in st.session_state:
+        st.session_state.additional_tokens = []
+    
+    # Show token input section when button is clicked
+    if st.session_state.get("show_token_input", False):
+        st.markdown("---")
+        st.markdown('<div class="token-input-section">', unsafe_allow_html=True)
+        st.subheader("🪙 Add Missing Token Addresses")
+        st.markdown("Enter token contract addresses that might be missing from your portfolio analysis.")
+        
+        # Create three columns for token input
+        input_col1, input_col2, input_col3 = st.columns([3, 1, 1])
+        
+        with input_col1:
+            # Text area for multiple token addresses
+            token_input = st.text_area(
+                "Token Contract Addresses",
+                placeholder="0x7fc66500c84a76ad7e9c93437bfc5ac33e2ddae9\n0xc944e90c64b2c07662a292be6244bdf05cda44a7\n0x4e3fbd56cd56c3e72c1403e103b45db9da5b9d2b",
+                help="Enter one token address per line. Examples:\n• 0x7fc66500c84a76ad7e9c93437bfc5ac33e2ddae9 (AAVE)\n• 0xc944e90c64b2c07662a292be6244bdf05cda44a7 (GRT)\n• 0x4e3fbd56cd56c3e72c1403e103b45db9da5b9d2b (CVX)",
+                height=120
+            )
+        
+        with input_col2:
+            st.markdown("**Quick Add:**")
+            # Quick add buttons for popular tokens
+            popular_tokens = {
+                "AAVE": "0x7fc66500c84a76ad7e9c93437bfc5ac33e2ddae9",
+                "GRT": "0xc944e90c64b2c07662a292be6244bdf05cda44a7",
+                "CVX": "0x4e3fbd56cd56c3e72c1403e103b45db9da5b9d2b",
+                "CRV": "0xd533a949740bb3306d119cc777fa900ba034cd52",
+                "LDO": "0x5a98fcbea516cf06857215779fd812ca3bef1b32"
+            }
+            
+            for token_name, token_addr in popular_tokens.items():
+                if st.button(f"Add {token_name}", key=f"quick_add_{token_name}", use_container_width=True):
+                    if token_addr not in st.session_state.additional_tokens:
+                        st.session_state.additional_tokens.append(token_addr)
+                        st.success(f"Added {token_name}!")
+                    else:
+                        st.info(f"{token_name} already added")
+        
+        with input_col3:
+            st.markdown("**Actions:**")
+            # Add tokens button
+            if st.button("➕ Add Tokens", use_container_width=True):
+                if token_input.strip():
+                    # Parse input tokens
+                    new_tokens = []
+                    
+                    # Fix: Replace newlines with commas, then split by commas.
+                    # This handles both newlines and commas as separators.
+                    cleaned_input = token_input.strip().replace('\n', ',')
+                    for addr in [t.strip() for t in cleaned_input.split(',')]:
+                        if addr and validate_ethereum_address(addr):
+                            if addr not in st.session_state.additional_tokens:
+                                new_tokens.append(addr)
+                        elif addr: # Invalid address
+                            st.warning(f"Invalid address: {addr[:20]}...")
+                    
+                    if new_tokens:
+                        st.session_state.additional_tokens.extend(new_tokens)
+                        st.success(f"Added {len(new_tokens)} token(s)!")
+                    else:
+                        st.info("No new valid tokens to add")
+            
+            # Clear all tokens button
+            if st.button("🗑️ Clear All", use_container_width=True):
+                st.session_state.additional_tokens = []
+                st.info("Cleared all additional tokens")
+        
+        # Display currently added tokens
+        if st.session_state.additional_tokens:
+            st.markdown("**Currently Added Tokens:**")
+            token_display_cols = st.columns(3)
+            
+            for i, token_addr in enumerate(st.session_state.additional_tokens):
+                col_idx = i % 3
+                with token_display_cols[col_idx]:
+                    # Create a container for each token with remove button
+                    token_container = st.container()
+                    with token_container:
+                        st.code(token_addr, language=None)
+                        if st.button("❌", key=f"remove_{i}", help="Remove this token"):
+                            st.session_state.additional_tokens.remove(token_addr)
+                            st.rerun()
+        
+        # Hide token input section button
+        if st.button("⬆️ Hide Token Input", use_container_width=True):
+            st.session_state.show_token_input = False
+            st.rerun()
+        
+        st.markdown('</div>', unsafe_allow_html=True)
     
     # ========================================
     # PORTFOLIO ANALYSIS LOGIC
@@ -213,9 +323,16 @@ def main():
         st.subheader("Analyzing Wallet")
         st.markdown(f'<div class="wallet-address">{wallet_address}</div>', unsafe_allow_html=True)
         
+        # Show info about additional tokens if any
+        if st.session_state.additional_tokens:
+            st.info(f"🪙 Including {len(st.session_state.additional_tokens)} additional token(s) in analysis")
+        
         # Fetch portfolio data with loading spinner
         with st.spinner("🔍 Fetching portfolio data via Web3 + Alchemy..."):
-            portfolio_data = get_cached_portfolio_data(wallet_address)
+            portfolio_data = get_cached_portfolio_data(
+                wallet_address, 
+                st.session_state.additional_tokens if st.session_state.additional_tokens else None
+            )
         
         # Display results or error message
         if portfolio_data:
@@ -228,14 +345,18 @@ def main():
 # ========================================
 
 @st.cache_data(ttl=300)  # Cache for 5 minutes to avoid repeated API calls
-def get_cached_portfolio_data(wallet_address):
+def get_cached_portfolio_data(wallet_address, additional_tokens=[None]):
     """
     Get portfolio data with caching - runs the async function and returns serializable data.
     This function handles the async-to-sync conversion and ensures data is cacheable.
     """
     
-    # Run the async function to get portfolio data
-    portfolio_data = asyncio.run(get_portfolio_data(wallet_address))
+    # Run the async function to get portfolio data with additional tokens
+    portfolio_data = asyncio.run(get_portfolio_data(
+        wallet_address, 
+        debug_mode=False,  # Set to True for debugging
+        additional_tokens=additional_tokens
+    ))
     
     # Ensure the data is serializable by converting complex objects to basic types
     if portfolio_data:
@@ -258,7 +379,8 @@ def get_cached_portfolio_data(wallet_address):
                 }
                 for token in portfolio_data.get('tokens', [])
             ],
-            'last_updated': str(portfolio_data.get('last_updated', datetime.now().isoformat()))
+            'last_updated': str(portfolio_data.get('last_updated', datetime.now().isoformat())),
+            'additional_tokens_count': len(additional_tokens) if additional_tokens else 0
         }
         return serializable_data
     
@@ -277,6 +399,10 @@ def display_portfolio(portfolio_data):
     
     st.markdown("---")
     st.subheader("📊 Portfolio Overview")
+    
+    # Display additional tokens info if any were used
+    if portfolio_data.get('additional_tokens_count', 0) > 0:
+        st.info(f"🪙 Analysis included {portfolio_data['additional_tokens_count']} additional token(s)")
     
     # Display key metrics in four columns
     col1, col2, col3, col4 = st.columns(4)
