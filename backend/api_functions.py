@@ -1,6 +1,3 @@
-# --- Simplified Portfolio Tracker - Only 2 APIs ---
-# Uses: Etherscan API + CoinGecko API (no Web3/RPC needed)
-
 import os
 from dotenv import load_dotenv
 from typing import Dict, List, Optional
@@ -59,7 +56,6 @@ def validate_ethereum_address(address: str) -> bool:
 def check_api_keys() -> Dict[str, bool]:
     """Check API keys without initializing connections that might cause recursion."""
     return {
-        "web3": bool(WEB3_PROVIDER_URL),  # Just check if URL exists
         "coingecko": bool(COINGECKO_API_KEY),
         "etherscan": bool(ETHERSCAN_API_KEY)
     }
