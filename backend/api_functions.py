@@ -239,7 +239,7 @@ async def get_held_tokens_etherscan(wallet_address: str, session: aiohttp.Client
         "action": "tokentx",
         "address": wallet_address,
         "page": 1,
-        "offset": 100000,  # Get last 100,000 transactions
+        "offset": 1000,  # Get last 100,000 transactions
         "sort": "desc",
         "apikey": ETHERSCAN_API_KEY
     }
